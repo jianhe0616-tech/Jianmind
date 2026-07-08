@@ -71,3 +71,55 @@ class JianMindConfig(PretrainedConfig):
             else None
         )
 
+import torch
+import torch.nn as nn
+import math
+from typing import Optional
+
+###RMSNorm 模块实现
+class RMSNorm(nn.Module):
+## 首先是init初始化
+    def __init__(self,dim:int,eps:float = 1e-5):
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+## 然后是norm的计算公式
+## rsqrt:开方之后取倒数
+## mean(纬度：-1,keepdim=True):对最后一个纬度求均值，keepdim=True表示保持维度不变
+    def norm(self,x:torch.tensor):
+        return x * torch.rsqrt(x.pow(2).mean(-1,keepdim=True) + self.eps)
+    
+## 然后前向传播
+    def forward(self,x:torch.tensor):
+        output = self.norm(x.float()) * self.weight
+        return output
+###
+
+### YaRN参数计算方法  dim:纬度   end：训练最大序列长度   base：频率计算基底  rope_scaling：缩放公式各参数
+def precompute_freqs_cis(dim:int,end:int,rope_base:int,rope_scaling:Optional[dict]=None):
+    #初始化频率，和softmax缩放系数  语法：python允许在任何对象后面直接加.或者[]来调用方法
+    #如下直接调用了[]截断（防止奇数）和.float方法
+    i=torch.arange(0, dim, 2)[:dim//2].float()  
+    fre = 1/(rope_base**(2*i/dim))
+    attn_factor = 1.0
+    if rope_scaling is not None:
+        max_pre_context = rope_scaling["original_max_position_embeddings"]
+        beta_fast = rope_scaling["beta_fast"]
+        beta_slow = rope_scaling["beta_slow"]
+        factor_s = rope_scaling["factor"]
+
+        #判断推理长度和训练文本长度
+        #当b=1和32时，复用lambda函数可以求出对应的维度边界,即波长b到i的映射
+        if end>max_pre_context:
+            inv_dim = lambda b: (dim * math.log(max_pre_context/(b*2*math.pi)))/(2*math.log(rope_base))
+        
+        #划分高低维度
+        dim_low = max(0, int(math.floor(inv_dim(beta_slow))))
+        dim_high = min(dim // 2, int(math.ceil(inv_dim(beta_fast))))
+
+        
+
+        
+
+
