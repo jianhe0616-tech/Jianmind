@@ -64,31 +64,15 @@ def precompute_freqs_cis(dim:int,end:int,rope_base:int,rope_scaling:Optional[dic
     # ✅ 修复：改成单行，确保返回的是张量而不是元组
     freqs_cos = freqs_cos * attn_factor
     freqs_sin = freqs_sin * attn_factor
-    
-
-    # # 🔥 调试打印：查看返回的形状
-    # print(f"[DEBUG precompute] freqs_cos.shape = {freqs_cos.shape}")
-    # print(f"[DEBUG precompute] freqs_sin.shape = {freqs_sin.shape}")
-    # print(f"[DEBUG precompute] freqs_cos = {freqs_cos}")
-    # print(f"[DEBUG precompute] freqs_sin = {freqs_sin}")
-
     return freqs_cos, freqs_sin
 ##
 ##RoPE旋转编码函数
 def apply_rotary_pos_emb(q,k,freqs_cos, freqs_sin):
 
-    # 🔥 调试打印：查看输入形状
-    # print(f"[DEBUG apply] q.shape = {q.shape}")
-    # print(f"[DEBUG apply] k.shape = {k.shape}")
-    # print(f"[DEBUG apply] freqs_cos.shape = {freqs_cos.shape}")
-    # print(f"[DEBUG apply] freqs_sin.shape = {freqs_sin.shape}")
     #纬度修正：
     #确保freqs_cos和freqs_sin的形状与q和k的最后一个维度匹配
     freqs_cos = freqs_cos.unsqueeze(1)
     freqs_sin = freqs_sin.unsqueeze(1)
-    
-    # print(f"[DEBUG apply] freqs_cos.shape = {freqs_cos.shape}")
-    # print(f"[DEBUG apply] freqs_sin.shape = {freqs_sin.shape}")
 
     #将q和k的最后一个维度拆分为两部分，分别表示偶数和奇数位置的向量
     q1, q2 = q[..., ::2], q[..., 1::2]

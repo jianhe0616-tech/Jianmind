@@ -6,6 +6,14 @@ from typing import Optional
 from config import JianMindConfig
 from layers import RMSNorm, precompute_freqs_cis, apply_rotary_pos_emb
 
+# 激活函数映射
+ACT2FN = {
+    "silu": F.silu,
+    "gelu": F.gelu,
+    "relu": F.relu,
+}
+
+
 def kv_repeat(x, num_group):
     """
     重复 KV 张量以匹配 Q 的头数。
@@ -23,20 +31,20 @@ def kv_repeat(x, num_group):
 class MultiHeadAttention(nn.Module):
     def __init__ (self, config: JianMindConfig):
         super().__init__()
-        self.config = config
         self.hidden_dim = config.hidden_size
         self.hidden_layers = config.num_hidden_layers
-        self.intermediate_size = config.intermediate_size
         self.heads = config.num_attention_heads
         self.kv_heads = config.num_key_value_heads
-        self.hidden_act = config.hidden_act
         self.dropout = config.dropout
+        self.rope_base = config.rope_base
+        self.rope_scaling = config.inference_rope_scaling
         self.flash_attention = hasattr(config, "flash_attention") and config.flash_attention
 
         assert self.hidden_dim % self.heads == 0, "hidden_dim must be divisible by num_attention_heads"
         self.head_dim = self.hidden_dim // self.heads  #每个头的维度
-        self.num_group = self.heads // self.kv_heads  #每组4个q 共享一组kv
+        self.num_kv_group = self.heads // self.kv_heads  #每组4个q 共享一组kv
         
+        #注意这里维度的变化，q保持不变，为了更丰富的表达能力，kv变成了kv_heads * head_dim, 也就是每组4个q共享一组kv，减少了参数量
         self.wq = nn.Linear(self.hidden_dim, self.hidden_dim, bias=False)
         self.wk = nn.Linear(self.hidden_dim, self.kv_heads * self.head_dim, bias=False)
         self.wv = nn.Linear(self.hidden_dim, self.kv_heads * self.head_dim, bias=False)
@@ -49,7 +57,93 @@ class MultiHeadAttention(nn.Module):
                 use_cache: bool = False,
                 attention_mask: Optional[torch.Tensor] = None):
         batch_size, seq_len, _ = x.shape
-        q = self.wq(x).view(batch_size, self.heads, self.head_dim, seq_len).transpose(2, 3)  # [batch_size, num_attention_heads, seq_len, head_dim]
-        k = self.wk(x).view(batch_size, self.kv_heads * self.num_group, self.head_dim, seq_len).transpose(2, 3)
-        v = self.wv(x).view(batch_size, self.kv_heads * self.num_group, seq_len, self.head_dim)
+        q = self.wq(x).view(batch_size, seq_len, self.heads, self.head_dim)
+        k = self.wk(x).view(batch_size, seq_len, self.kv_heads, self.head_dim)
+        v = self.wv(x).view(batch_size, seq_len, self.kv_heads, self.head_dim)
+
+        #添加位置编码
+        freqs_cos, freqs_sin = pos_embedding
+        q_rotated, k_rotated = apply_rotary_pos_emb(q, k, freqs_cos, freqs_sin)
+
+        #如果使用缓存，则将当前的 k 和 v 与过去的 k 和 v 拼接
+        if past_kv is not None:
+            past_k, past_v = past_kv
+            k_rotated = torch.cat([past_k, k_rotated], dim=1)
+            v = torch.cat([past_v, v], dim=1)  #这里 [cache_k, k] 创建了一个包含两个张量的列表
+        if use_cache:
+            past_kv = (k_rotated, v)  #更新缓存
+
+        #重复 KV 张量以匹配 Q 的头数
+        k_rotated = kv_repeat(k_rotated, self.num_kv_group)
+        v = kv_repeat(v, self.num_kv_group)
+
+        #计算注意力分数
+        #交换一下头维度和序列维度，方便后续矩阵乘法
+        q_rotated = q_rotated.transpose(1, 2)  # [batch_size, heads, seq_len, head_dim]
+        k_rotated = k_rotated.transpose(1, 2)  # [batch_size, heads, seq_len, head_dim]
+        v = v.transpose(1, 2)  # [batch_size, heads, seq_len, head_dim]
+        attn_scores = torch.matmul(q_rotated, k_rotated.transpose(-2, -1))/(math.sqrt(self.head_dim))
+
+        #加入注意力掩码
+        #采用加法，不需要掩盖的下三角为0，掩盖的上三角为一个很大的负数-inf，这样在softmax之后就会接近0
+        if attention_mask is not None:
+            attn_scores = attn_scores + attention_mask  #注意力掩码通常是一个很大的负数，用于屏蔽不需要关注的部分
+
+        #softmax+dropout
+        attn_scores = F.softmax(attn_scores,dim=-1)
+        attn_scores = self.dropout_layer(attn_scores)
+
+        #计算注意力输出
+        attn_output = torch.matmul(attn_scores, v)
+        #交换回头维度和序列维度，并将多头的输出拼接起来
+        #contiguous() 确保内存连续，view() 重新调整形状为 [batch_size, seq_len, hidden_dim]
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_dim)
+        #输出线性变换
+        output = self.wo(attn_output)
+        return output, past_kv if use_cache else None
         
+class FeedForward(nn.Module):
+    def __init__(self, config: JianMindConfig):
+        super().__init__()
+        self.hidden_dim = config.hidden_size
+        # intermediate_size 如果没设，按 LLaMA 惯例取 8/3 倍
+        if config.intermediate_size is None:
+            self.intermediate_dim = int(2 * config.hidden_size * 4 / 3)
+        else:
+            self.intermediate_dim = config.intermediate_size
+        self.dropout = nn.Dropout(config.dropout)
+        #swiGLU激活函数曾
+        self.gate_proj = nn.Linear(self.hidden_dim,self.intermediate_dim,bias=False)
+        self.up_proj=nn.Linear(self.hidden_dim,self.intermediate_dim,bias=False)
+        self.down_proj=nn.Linear(self.intermediate_dim,self.hidden_dim,bias=False)
+        self.act = ACT2FN[config.hidden_act]   # "silu" → F.silu
+    
+    def forward(self,x:torch.Tensor):
+        return self.dropout(self.down_proj(self.up_proj(x) * self.act((self.gate_proj(x)))))
+    
+class Transformer_block(nn.modules):
+    def __init__ (self,config:JianMindConfig):
+        super().__init__
+        self.attention = MultiHeadAttention(config)
+        self.ffn = FeedForward(config)
+        self.rms_norm1 = RMSNorm(config.hidden_size, config.rms_norm_eps)   
+        self.rms_norm2 = RMSNorm(config.hidden_size, config.rms_norm_eps)   
+
+
+    def forward(self, x: torch.Tensor, 
+                pos_embedding: tuple[torch.Tensor, torch.Tensor], 
+                past_kv: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+                use_cache: bool = False,
+                attention_mask: Optional[torch.Tensor] = None)->torch.Tensor:
+        x1 = self.rms_norm1(x)
+        h1 , cur_kv_cache = self.attention(x1,pos_embedding,past_kv,use_cache,attention_mask)
+        x = x+h1
+        x2 = self.rms_norm2(x)
+        h2 = self.ffn(x2)
+        x = x+h2
+        return x , cur_kv_cache
+
+class JianMind(nn.modules):
+    def __init__ (self,config:JianMindConfig):
+        super().__init__
+        self.num_layer_trans = config.num_hidden_layers ##trans

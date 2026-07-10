@@ -1,8 +1,5 @@
 ##这里放各参数设置
 from transformers import PretrainedConfig
-
-from transformers import PretrainedConfig
-
 class JianMindConfig(PretrainedConfig):
     model_type = "jianmind"
 
