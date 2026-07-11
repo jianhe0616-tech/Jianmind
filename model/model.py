@@ -36,7 +36,7 @@ class MultiHeadAttention(nn.Module):
         self.kv_heads = config.num_key_value_heads
         self.dropout = config.dropout
         self.rope_base = config.rope_base
-        self.rope_scaling = config.inference_rope_scaling
+        self.rope_scaling = config.rope_scaling
         self.flash_attention = hasattr(config, "flash_attention") and config.flash_attention
 
         assert self.hidden_dim % self.heads == 0, "hidden_dim must be divisible by num_attention_heads"
@@ -120,9 +120,9 @@ class FeedForward(nn.Module):
     def forward(self,x:torch.Tensor):
         return self.dropout(self.down_proj(self.up_proj(x) * self.act((self.gate_proj(x)))))
     
-class Transformer_block(nn.modules):
+class Transformer_block(nn.Module):
     def __init__ (self,config:JianMindConfig):
-        super().__init__
+        super().__init__()
         self.attention = MultiHeadAttention(config)
         self.ffn = FeedForward(config)
         self.rms_norm1 = RMSNorm(config.hidden_size, config.rms_norm_eps)   
@@ -146,6 +146,11 @@ class JianMind(nn.Module):
     def __init__ (self,config:JianMindConfig):
         super().__init__()
         self.tok_embeddings = nn.Embedding(config.vocab_size,config.hidden_size)
+        self.dropout = nn.Dropout(config.dropout)
+        self.dim = config.hidden_size
+        self.head_dim = config.hidden_size // config.num_attention_heads
+        self.rope_base = config.rope_base
+        self.rope_scaling = config.rope_scaling
         self.num_layer_trans = nn.ModuleList([
             Transformer_block(config) for _ in range(config.num_hidden_layers)
         ])
@@ -153,15 +158,18 @@ class JianMind(nn.Module):
         self.lm_head = nn.Linear(config.hidden_size,config.vocab_size)
         self.lm_head.weight = self.tok_embeddings.weight   # ✅ lm_head 复用 embedding 的权重 自己训练词表对应的权重
 
-    def forward(self, x: torch.Tensor, 
-                pos_embedding: tuple[torch.Tensor, torch.Tensor], 
-                past_kv: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-                use_cache: bool = False,
-                attention_mask: Optional[torch.Tensor] = None):
-        x = self.tok_embeddings(x)
+    def forward(self,input_id:torch.Tensor,labels:torch.Tensor = None):
+        batch_size , seq_len = input_id.shape
+        x = self.tok_embeddings(input_id)
+        x = self.dropout(x)
+        pos_emb = precompute_freqs_cis(self.head_dim, seq_len, self.rope_base, self.rope_scaling)
+        attention_mask = torch.triu(torch.ones(seq_len,seq_len,device=x.device) * float('-inf'),diagonal=1)
         for layer in self.num_layer_trans:
-            x , _ = layer(x, pos_embedding,past_kv,use_cache,attention_mask)
+            x, _ = layer(x, pos_emb, None, False, attention_mask)
         x = self.norm(x)
         logits = self.lm_head(x)
-
-        return logits
+        loss = None
+        if labels is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
+        
+        return logits, loss
