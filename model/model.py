@@ -13,7 +13,6 @@ ACT2FN = {
     "relu": F.relu,
 }
 
-
 def kv_repeat(x, num_group):
     """
     重复 KV 张量以匹配 Q 的头数。
@@ -143,7 +142,26 @@ class Transformer_block(nn.modules):
         x = x+h2
         return x , cur_kv_cache
 
-class JianMind(nn.modules):
+class JianMind(nn.Module):
     def __init__ (self,config:JianMindConfig):
-        super().__init__
-        self.num_layer_trans = config.num_hidden_layers ##trans
+        super().__init__()
+        self.tok_embeddings = nn.Embedding(config.vocab_size,config.hidden_size)
+        self.num_layer_trans = nn.ModuleList([
+            Transformer_block(config) for _ in range(config.num_hidden_layers)
+        ])
+        self.norm = RMSNorm(config.hidden_size,config.rms_norm_eps)
+        self.lm_head = nn.Linear(config.hidden_size,config.vocab_size)
+        self.lm_head.weight = self.tok_embeddings.weight   # ✅ lm_head 复用 embedding 的权重 自己训练词表对应的权重
+
+    def forward(self, x: torch.Tensor, 
+                pos_embedding: tuple[torch.Tensor, torch.Tensor], 
+                past_kv: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+                use_cache: bool = False,
+                attention_mask: Optional[torch.Tensor] = None):
+        x = self.tok_embeddings(x)
+        for layer in self.num_layer_trans:
+            x , _ = layer(x, pos_embedding,past_kv,use_cache,attention_mask)
+        x = self.norm(x)
+        logits = self.lm_head(x)
+
+        return logits
