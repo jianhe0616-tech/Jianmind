@@ -155,7 +155,7 @@ class JianMind(nn.Module):
             Transformer_block(config) for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size,config.rms_norm_eps)
-        self.lm_head = nn.Linear(config.hidden_size,config.vocab_size)
+        self.lm_head = nn.Linear(config.hidden_size,config.vocab_size,bias=False)
         self.lm_head.weight = self.tok_embeddings.weight   # ✅ lm_head 复用 embedding 的权重 自己训练词表对应的权重
 
     def forward(self,input_id:torch.Tensor,labels:torch.Tensor = None):
