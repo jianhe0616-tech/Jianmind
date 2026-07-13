@@ -78,6 +78,6 @@ def apply_rotary_pos_emb(q,k,freqs_cos, freqs_sin):
     q1, q2 = q[..., ::2], q[..., 1::2]
     k1, k2 = k[..., ::2], k[..., 1::2]
     #计算旋转后的q和k
-    q_rotated = torch.cat([q1 * freqs_cos - q2 * freqs_sin, q1 * freqs_sin + q2 * freqs_cos], dim=-1)
-    k_rotated = torch.cat([k1 * freqs_cos - k2 * freqs_sin, k1 * freqs_sin + k2 * freqs_cos], dim=-1)
+    q_rotated = torch.cat([q1 * freqs_cos - q2 * freqs_sin, q1 * freqs_sin + q2 * freqs_cos], dim=-1).to(q.dtype)
+    k_rotated = torch.cat([k1 * freqs_cos - k2 * freqs_sin, k1 * freqs_sin + k2 * freqs_cos], dim=-1).to(q.dtype)
     return q_rotated, k_rotated

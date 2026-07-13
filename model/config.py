@@ -1,4 +1,5 @@
 ##这里放各参数设置
+from typing import Optional
 from transformers import PretrainedConfig
 class JianMindConfig(PretrainedConfig):
     model_type = "jianmind"
@@ -10,15 +11,15 @@ class JianMindConfig(PretrainedConfig):
         bos_token_id: int = 1,                    # 句子开始 token ID
         eos_token_id: int = 2,                    # 句子结束 token ID
         hidden_act: str = "silu",                 # 激活函数 (silu/swish)
-        hidden_size: int = 512,                   # 隐藏层维度（模型宽度）
+        hidden_size: int = 768,                   # 隐藏层维度（模型宽度）
         intermediate_size: int = None,            # FFN 中间维度，None 则自动计算
         max_position_embeddings: int = 32768,     # 最大上下文长度 (32k)
         num_attention_heads: int = 8,             # Query 头数
         num_hidden_layers: int = 8,               # Transformer 层数
-        num_key_value_heads: int = 2,             # KV 头数（GQA 分组）
+        num_key_value_heads: int = 4,             # KV 头数（GQA 分组）
         vocab_size: int = 6400,                   # 词表大小
         rms_norm_eps: float = 1e-05,              # RMSNorm 防除零系数
-        rope_base: int = 1000000,                # RoPE 基数（用于位置编码）
+        rope_theta: float = 1000000.0,            # RoPE 基数（用于位置编码）
         inference_rope_scaling: bool = False,     # 是否启用 YaRN 上下文扩展
         flash_attention: bool = True,             # 是否使用 Flash Attention
         # ==================== MoE 混合专家参数 ====================
@@ -46,7 +47,7 @@ class JianMindConfig(PretrainedConfig):
         self.num_key_value_heads = num_key_value_heads
         self.vocab_size = vocab_size
         self.rms_norm_eps = rms_norm_eps
-        self.rope_base = rope_base
+        self.rope_theta = rope_theta
         self.inference_rope_scaling = inference_rope_scaling
         self.flash_attention = flash_attention
         self.use_moe = use_moe
@@ -58,7 +59,6 @@ class JianMindConfig(PretrainedConfig):
         self.aux_loss_alpha = aux_loss_alpha
         self.scoring_func = scoring_func
 
-        # YaRN 扩展配置（当 inference_rope_scaling 为 True 时启用）
         self.rope_scaling = (
             {
                 "beta_fast": 32,

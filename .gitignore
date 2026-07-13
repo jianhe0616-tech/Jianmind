@@ -7,4 +7,33 @@ wheels/
 *.egg-info
 
 # Virtual environments
-.venv
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# 模型权重 & checkpoint（太大，不上传 git）
+*.pt
+*.pth
+*.bin
+*.safetensors
+checkpoints/
+
+# 数据集（太大）
+data/
+dataset/*.json
+dataset/*.jsonl
+
+# 日志
+logs/
+*.log
+
+# 环境变量（含 token 等敏感信息）
+.env
+
+# macOS
+.DS_Store
