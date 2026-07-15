@@ -3,8 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from typing import Optional , Union
-from config import JianMindConfig
-from layers import RMSNorm, precompute_freqs_cis, apply_rotary_pos_emb
+from .config import JianMindConfig
+from .layers import RMSNorm, precompute_freqs_cis, apply_rotary_pos_emb
 from transformers import PreTrainedModel ,GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -223,7 +223,8 @@ class JianMindForCausalLM(PreTrainedModel,GenerationMixin):
                 past_key_values: Optional[list] = None,
                 use_cache: bool = False,
                 logits_to_keep: Union[int, torch.Tensor]=0,
-                **args
+                labels = None,
+                **kwargs
                 ):
         hidden_states , new_past_key_values = self.model(input_ids,past_key_values,use_cache)
         
@@ -236,8 +237,13 @@ class JianMindForCausalLM(PreTrainedModel,GenerationMixin):
                   else logits_to_keep)
         )
         logits = self.lm_head(hidden_states[:,slice_indices,:])
+        loss = None
+        if labels is not None:
+            x, y = logits[..., :-1, :].contiguous(), labels[..., 1:].contiguous()
+            loss = F.cross_entropy(x.view(-1, x.size(-1)), y.view(-1), ignore_index=-100)
 
         return CausalLMOutputWithPast(
+            loss = loss,
             logits = logits,
             past_key_values = new_past_key_values,
             hidden_states = hidden_states,

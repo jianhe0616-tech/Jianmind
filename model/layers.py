@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import math
 from typing import Optional
-from config import JianMindConfig
+
 
 ###RMSNorm 模块实现
 class RMSNorm(nn.Module):
@@ -16,11 +16,11 @@ class RMSNorm(nn.Module):
 ## 然后是norm的计算公式
 ## rsqrt:开方之后取倒数
 ## mean(纬度：-1,keepdim=True):对最后一个纬度求均值，keepdim=True表示保持维度不变,后面加eps防止除零
-    def norm(self,x:torch.tensor):
+    def norm(self,x:torch.Tensor):
         return x * torch.rsqrt(x.pow(2).mean(-1,keepdim=True) + self.rms_norm_eps)
     
 ## 然后前向传播
-    def forward(self,x:torch.tensor):
+    def forward(self,x:torch.Tensor):
         output = self.norm(x.float()) * self.weight
         return output
 ###
