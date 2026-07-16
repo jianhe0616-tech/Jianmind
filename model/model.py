@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -46,8 +47,8 @@ class MultiHeadAttention(nn.Module):
         self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)      # QK 归一化
-        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)      # QK 归一化
+        self.q_norm = RMSNorm(self.head_dim, rms_norm_eps=config.rms_norm_eps)      # QK 归一化
+        self.k_norm = RMSNorm(self.head_dim, rms_norm_eps=config.rms_norm_eps)      # QK 归一化
         self.attention_dropout = nn.Dropout(self.attention_dropout)
 
     def forward(self, x: torch.Tensor,
@@ -218,6 +219,24 @@ class JianMindForCausalLM(PreTrainedModel,GenerationMixin):
         self.model = JianMindModel(config)
         self.lm_head = nn.Linear(config.hidden_size,config.vocab_size,bias=False)
         self.lm_head.weight = self.model.embed_tokens.weight  # ✅ lm_head 复用 embedding 的权重 自己训练词表对应的权重
+        # 关键：必须显式调用 post_init() 才会执行下方的 _init_weights，
+        # 否则 Embedding/Linear 用 PyTorch 默认初始化（std=1.0），
+        # 在 weight tying 下 lm_head 权重同样为 std=1.0，
+        # 会导致 logits 数值爆炸（std≈sqrt(hidden)≈27）、初始 loss 飙到几百且无法收敛。
+        self.post_init()
+
+    def _init_weights(self, module):
+        # LLaMA/minimind 风格初始化：Linear 与 Embedding 都用 std=0.02 的小方差正态分布，
+        # 配合 weight tying 后 lm_head 权重同样为 0.02，使初始 logits 量级合理（≈ln(vocab)）。
+        std = getattr(self.config, "initializer_range", 0.02)
+        if isinstance(module, nn.Linear):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
 
     def forward(self,input_ids:torch.Tensor,
                 past_key_values: Optional[list] = None,

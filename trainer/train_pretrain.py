@@ -250,9 +250,9 @@ if __name__ == "__main__":
         loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True)
         if skip > 0: 
             Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
-            train_epoch(epoch, loader, len(loader) + skip, start_step, wandb)
+            train_epoch(epoch, loader, len(loader) + skip, optimizer, start_step, wandb)
         else:
-            train_epoch(epoch, loader, len(loader), 0, wandb)
+            train_epoch(epoch, loader, len(loader), optimizer, 0, wandb)
     
     # ========== 9. 清理分布进程 ==========
     if dist.is_initialized():

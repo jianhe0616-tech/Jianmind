@@ -8,9 +8,9 @@ def get_train_config():
     
     # ====== 训练控制参数 ======
     parser.add_argument("--epochs", type=int, default=2, help="训练轮数")
-    parser.add_argument("--batch_size", type=int, default=32, help="batch size")
+    parser.add_argument("--batch_size", type=int, default=160, help="batch size")
     parser.add_argument("--learning_rate", type=float, default=5e-4, help="初始学习率")
-    parser.add_argument("--accumulation_steps", type=int, default=8, help="梯度累积步数")
+    parser.add_argument("--accumulation_steps", type=int, default=1, help="梯度累积步数")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪阈值")
     
     # ====== 模型结构参数（可覆盖config默认值） ======
@@ -19,13 +19,13 @@ def get_train_config():
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE")
     
     # ====== 数据参数 ======
-    parser.add_argument('--max_seq_len', default=340, type=int, help="最大序列长度")
+    parser.add_argument('--max_seq_len', default=512, type=int, help="最大序列长度")
     parser.add_argument("--data_path", type=str, default="../dataset/pretrain_t2t.jsonl", help="数据路径")
     
     # ====== 硬件参数 ======
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="训练设备")
-    parser.add_argument("--dtype", type=str, default="bfloat16", help="混合精度类型")
-    parser.add_argument("--num_workers", type=int, default=8, help="数据加载线程数")
+    parser.add_argument("--dtype", type=str, default="float16", help="混合精度类型(bf16需Ampere及以上,2080ti等Turing卡请用float16)")
+    parser.add_argument("--num_workers", type=int, default=16, help="数据加载线程数")
     
     # ====== 日志与保存 ======
     parser.add_argument("--log_interval", type=int, default=100, help="日志打印间隔")
