@@ -22,7 +22,7 @@ class RMSNorm(nn.Module):
 ## 然后前向传播
     def forward(self,x:torch.Tensor):
         output = self.norm(x.float()) * self.weight
-        return output
+        return output.to(x.dtype)  # 还原输入 dtype，避免 autocast 下多余的隐式转换
 ###
 
 ### YaRN参数计算方法  dim:纬度   end：训练最大序列长度   base：频率计算基底  rope_scaling：缩放公式各参数
@@ -74,10 +74,16 @@ def apply_rotary_pos_emb(q,k,freqs_cos, freqs_sin):
     freqs_cos = freqs_cos.unsqueeze(1)
     freqs_sin = freqs_sin.unsqueeze(1)
 
-    #将q和k的最后一个维度拆分为两部分，分别表示偶数和奇数位置的向量
-    q1, q2 = q[..., ::2], q[..., 1::2]
-    k1, k2 = k[..., ::2], k[..., 1::2]
-    #计算旋转后的q和k
-    q_rotated = torch.cat([q1 * freqs_cos - q2 * freqs_sin, q1 * freqs_sin + q2 * freqs_cos], dim=-1).to(q.dtype)
-    k_rotated = torch.cat([k1 * freqs_cos - k2 * freqs_sin, k1 * freqs_sin + k2 * freqs_cos], dim=-1).to(q.dtype)
+    #将q和k的最后一维重塑为相邻对 (..., head_dim//2, 2)，确保 (d0,d1) 共用同一个旋转角度
+    # ❌ 旧写法 q[...,::2], q[...,1::2] 是交错取数，导致维度配对错误
+    # ✅ 新写法 reshape(-1,2) 保证相邻维度配对
+    q_pairs = q.reshape(*q.shape[:-1], -1, 2)
+    q1, q2 = q_pairs[..., 0], q_pairs[..., 1]
+    k_pairs = k.reshape(*k.shape[:-1], -1, 2)
+    k1, k2 = k_pairs[..., 0], k_pairs[..., 1]
+    #计算旋转后的q和k，stack+flatten 恢复原始形状
+    q_rotated = torch.stack([q1 * freqs_cos - q2 * freqs_sin,
+                             q1 * freqs_sin + q2 * freqs_cos], dim=-1).flatten(-2).to(q.dtype)
+    k_rotated = torch.stack([k1 * freqs_cos - k2 * freqs_sin,
+                             k1 * freqs_sin + k2 * freqs_cos], dim=-1).flatten(-2).to(k.dtype)
     return q_rotated, k_rotated

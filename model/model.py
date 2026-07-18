@@ -49,7 +49,7 @@ class MultiHeadAttention(nn.Module):
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         self.q_norm = RMSNorm(self.head_dim, rms_norm_eps=config.rms_norm_eps)      # QK 归一化
         self.k_norm = RMSNorm(self.head_dim, rms_norm_eps=config.rms_norm_eps)      # QK 归一化
-        self.attention_dropout = nn.Dropout(self.attention_dropout)
+        self.attention_dropout = nn.Dropout(config.dropout)
 
     def forward(self, x: torch.Tensor,
                 pos_embedding: tuple[torch.Tensor, torch.Tensor],
@@ -190,12 +190,17 @@ class JianMindModel(nn.Module):
             self.freqs_sin[past_len:past_len + seq_len]
         )
 
-        # 3. causal mask：只在 prefill 阶段（past_len==0 且 seq_len>1）需要
-        #    decode 阶段（past_len>0 或 seq_len==1）不需要 mask
-        if past_len == 0 and seq_len > 1:
-            attention_mask = torch.triu(
-                torch.ones(seq_len, seq_len, device=x.device) * float('-inf'), diagonal=1
+        # 3. causal mask：当新输入有多个 token 时需要掩码（防止看到未来信息）
+        #    单 token decode（seq_len==1）不需要 mask
+        if seq_len > 1:
+            total_len = past_len + seq_len
+            # 创建 total_len × total_len 的掩码，只掩盖新 token 之间的未来位置
+            mask = torch.zeros(seq_len, total_len, device=x.device, dtype=x.dtype)
+            mask[:, past_len:] = torch.triu(
+                torch.full((seq_len, seq_len), float('-inf'), device=x.device, dtype=x.dtype),
+                diagonal=1
             )
+            attention_mask = mask
         else:
             attention_mask = None
 
@@ -258,7 +263,14 @@ class JianMindForCausalLM(PreTrainedModel,GenerationMixin):
         logits = self.lm_head(hidden_states[:,slice_indices,:])
         loss = None
         if labels is not None:
-            x, y = logits[..., :-1, :].contiguous(), labels[..., 1:].contiguous()
+            # labels 也需要和 logits 做相同的切片，保证形状对齐
+            label_slice = (
+                slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) and logits_to_keep > 0
+                else slice(logits_to_keep, None) if isinstance(logits_to_keep, int)
+                else slice(logits_to_keep, logits_to_keep)  # tensor 索引
+            )
+            sliced_labels = labels[:, label_slice]
+            x, y = logits[..., :-1, :].contiguous(), sliced_labels[..., 1:].contiguous()
             loss = F.cross_entropy(x.view(-1, x.size(-1)), y.view(-1), ignore_index=-100)
 
         return CausalLMOutputWithPast(

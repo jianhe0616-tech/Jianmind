@@ -112,7 +112,7 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None,
     ###加载模式分支：   ckp:checkpoint   ws:world_size  the num of gpu
     else:  # 加载模式 
         if os.path.exists(resume_path):
-            ckp_data = torch.load(resume_path, map_location='cpu')
+            ckp_data = torch.load(resume_path, map_location='cpu', weights_only=False)
         #动态适配 GPU 数量变化（智能 Step 转换） step:若有八卡，之前一次数据8*bs 现在四卡，4*bs
             saved_ws = ckp_data.get('world_size', 1)
             current_ws = dist.get_world_size() if dist.is_initialized() else 1
@@ -132,7 +132,11 @@ def init_model(lm_config, from_weight='pretrain', tokenizer_path='../dataset', s
         moe_suffix = '_moe' if lm_config.use_moe else ''
         weight_path = f'{save_dir}/{from_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
         weights = torch.load(weight_path, map_location=device)
-        model.load_state_dict(weights, strict=False) #允许权重文件中的键与模型不完全匹配。
+        missing, unexpected = model.load_state_dict(weights, strict=False) #允许权重文件中的键与模型不完全匹配。
+        if missing:
+            Logger(f'⚠️  加载权重时缺失的 key ({len(missing)}个): {missing[:5]}{"..." if len(missing)>5 else ""}')
+        if unexpected:
+            Logger(f'⚠️  加载权重时多余的 key ({len(unexpected)}个): {unexpected[:5]}{"..." if len(unexpected)>5 else ""}')
 
     get_model_params(model, lm_config)
     Logger(f'Trainable Params: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f}M')

@@ -33,7 +33,8 @@ from model.model import JianMindConfig
 from model.model import JianMindForCausalLM
 from trainer.trainer_utils import get_lr, Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, init_model, SkipBatchSampler
 
-warnings.filterwarnings('ignore')
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
 args = get_train_config()
 
 def train_epoch(
@@ -171,9 +172,9 @@ def train_epoch(
                 epoch=epoch,
                 step=step,
                 wandb=wandb,
-                save_dir='../checkpoints'
+                save_dir=args.save_dir
             )
-            
+
             # 9g. 切回训练模式
             model.train()
             # 9h. 手动释放内存
@@ -203,7 +204,7 @@ if __name__ == "__main__":
     # ========== 2. 配置目录、模型参数、检查ckp ==========
     os.makedirs(args.save_dir, exist_ok=True)
     lm_config =JianMindConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers, use_moe=bool(args.use_moe))
-    ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='../checkpoints') if args.from_resume==1 else None
+    ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir=args.save_dir) if args.from_resume==1 else None
     
     # ========== 3. 设置混合精度 ==========
     device_type = "cuda" if "cuda" in args.device else "cpu"
@@ -242,14 +243,16 @@ if __name__ == "__main__":
         model = DistributedDataParallel(model, device_ids=[local_rank])
     
     # ========== 8. 开始训练 ==========
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
     for epoch in range(start_epoch, args.epochs):
         train_sampler and train_sampler.set_epoch(epoch)
         setup_seed(42 + epoch); indices = torch.randperm(len(train_ds)).tolist()
-        skip = start_step if (epoch == start_epoch and start_step > 0) else 0
+        # DDP 下 start_step 是全局步数，需转为每卡的批次数
+        skip = (start_step // world_size) if (epoch == start_epoch and start_step > 0) else 0
         batch_sampler = SkipBatchSampler(train_sampler or indices, args.batch_size, skip)
         loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True)
-        if skip > 0: 
-            Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
+        if skip > 0:
+            Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{skip}个batch（全局step {start_step}），从step {start_step + 1}开始')
             train_epoch(epoch, loader, len(loader) + skip, optimizer, start_step, wandb)
         else:
             train_epoch(epoch, loader, len(loader), optimizer, 0, wandb)
