@@ -1,4 +1,3 @@
-from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -40,7 +39,7 @@ class MultiHeadAttention(nn.Module):
 
         assert self.hidden_size % self.num_heads == 0, "hidden_size must be divisible by num_attention_heads"
         self.head_dim = self.hidden_size // self.num_heads  #每个头的维度
-        self.num_key_value_groups = self.num_heads // self.num_key_value_heads  #每组4个q 共享一组kv
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads  #每组2个q 共享一组kv
 
         #注意这里维度的变化，q保持不变，为了更丰富的表达能力，kv变成了num_key_value_heads * head_dim, 也就是每组4个q共享一组kv，减少了参数量
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
@@ -197,7 +196,7 @@ class JianMindModel(nn.Module):
             # 创建 total_len × total_len 的掩码，只掩盖新 token 之间的未来位置
             mask = torch.zeros(seq_len, total_len, device=x.device, dtype=x.dtype)
             mask[:, past_len:] = torch.triu(
-                torch.full((seq_len, seq_len), float('-inf'), device=x.device, dtype=x.dtype),
+                torch.full((seq_len, seq_len), -1e9, device=x.device, dtype=x.dtype),
                 diagonal=1
             )
             attention_mask = mask
@@ -216,23 +215,32 @@ class JianMindModel(nn.Module):
         hidden_state = x
         return hidden_state, new_past_key_values
 
-class JianMindForCausalLM(PreTrainedModel,GenerationMixin):
+class JianMindForCausalLM(PreTrainedModel, GenerationMixin):
     config_class = JianMindConfig
-    def __init__(self, config:JianMindConfig):
-        self.config = config
+    
+    def __init__(self, config):
         super().__init__(config)
         self.model = JianMindModel(config)
-        self.lm_head = nn.Linear(config.hidden_size,config.vocab_size,bias=False)
-        self.lm_head.weight = self.model.embed_tokens.weight  # ✅ lm_head 复用 embedding 的权重 自己训练词表对应的权重
-        # 关键：必须显式调用 post_init() 才会执行下方的 _init_weights，
-        # 否则 Embedding/Linear 用 PyTorch 默认初始化（std=1.0），
-        # 在 weight tying 下 lm_head 权重同样为 std=1.0，
-        # 会导致 logits 数值爆炸（std≈sqrt(hidden)≈27）、初始 loss 飙到几百且无法收敛。
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        
+class JianMindForCausalLM(PreTrainedModel, GenerationMixin):
+    config_class = JianMindConfig
+    
+    def __init__(self, config):
+        super().__init__(config)
+        
+        self.model = JianMindModel(config)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        
+        # ✅ 先初始化所有权重
         self.post_init()
-
+        
+        # ✅ 然后绑定权重（覆盖初始化）  绑定之后指向同一个权重对象
+        if getattr(self.config, "tie_word_embeddings", True):
+            self.lm_head.weight = self.model.embed_tokens.weight
+    
     def _init_weights(self, module):
-        # LLaMA/minimind 风格初始化：Linear 与 Embedding 都用 std=0.02 的小方差正态分布，
-        # 配合 weight tying 后 lm_head 权重同样为 0.02，使初始 logits 量级合理（≈ln(vocab)）。
+        """由 post_init 调用"""
         std = getattr(self.config, "initializer_range", 0.02)
         if isinstance(module, nn.Linear):
             module.weight.data.normal_(mean=0.0, std=std)
@@ -243,41 +251,44 @@ class JianMindForCausalLM(PreTrainedModel,GenerationMixin):
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
 
-    def forward(self,input_ids:torch.Tensor,
-                past_key_values: Optional[list] = None,
-                use_cache: bool = False,
-                logits_to_keep: Union[int, torch.Tensor]=0,
-                labels = None,
-                **kwargs
-                ):
-        hidden_states , new_past_key_values = self.model(input_ids,past_key_values,use_cache)
-        
-        #所要保存的logits的切片索引,如果logits_to_keeps是整数，那就保留最后n个位置
-        # 生成的时候，只需要最后的logits来预测下一个词
-        # slice(start,stop) 等价与 start:stop
-        slice_indices = (
-            slice(-logits_to_keep,
-                  None if isinstance(logits_to_keep,int) 
-                  else logits_to_keep)
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        past_key_values: Optional[list] = None,
+        use_cache: bool = False,
+        logits_to_keep: Optional[int] = None,  # ✅ 默认 None，只在推理时使用
+        labels: Optional[torch.Tensor] = None,
+        **kwargs
+    ):
+        # 前向传播
+        hidden_states, new_past_key_values = self.model(
+            input_ids, past_key_values, use_cache
         )
-        logits = self.lm_head(hidden_states[:,slice_indices,:])
+        
+        # 计算 logits
+        logits = self.lm_head(hidden_states)  # (batch, seq_len, vocab)
+        
+        # 计算 loss（如果有 labels）
         loss = None
         if labels is not None:
-            # labels 也需要和 logits 做相同的切片，保证形状对齐
-            label_slice = (
-                slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) and logits_to_keep > 0
-                else slice(logits_to_keep, None) if isinstance(logits_to_keep, int)
-                else slice(logits_to_keep, logits_to_keep)  # tensor 索引
+            # 训练时使用完整 logits
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=-100
             )
-            sliced_labels = labels[:, label_slice]
-            x, y = logits[..., :-1, :].contiguous(), sliced_labels[..., 1:].contiguous()
-            loss = F.cross_entropy(x.view(-1, x.size(-1)), y.view(-1), ignore_index=-100)
-
+        
+        # 裁剪（仅在推理时，且 logits_to_keep 被指定）
+        if logits_to_keep is not None and labels is None:
+            if not isinstance(logits_to_keep, int) or logits_to_keep <= 0:
+                raise ValueError(f"logits_to_keep must be positive int, got {logits_to_keep}")
+            logits = logits[:, -logits_to_keep:, :]
+        
         return CausalLMOutputWithPast(
-            loss = loss,
-            logits = logits,
-            past_key_values = new_past_key_values,
-            hidden_states = hidden_states,
+            loss=loss,
+            logits=logits,
+            past_key_values=new_past_key_values,
+            hidden_states=hidden_states,
         )
-    
-

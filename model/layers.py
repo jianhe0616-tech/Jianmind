@@ -10,7 +10,6 @@ class RMSNorm(nn.Module):
 ## 首先是init初始化
     def __init__(self,dim:int,rms_norm_eps:float = 1e-5):
         super().__init__()
-        self.dim = dim
         self.rms_norm_eps = rms_norm_eps
         self.weight = nn.Parameter(torch.ones(dim))
 ## 然后是norm的计算公式

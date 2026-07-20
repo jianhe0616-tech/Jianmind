@@ -25,6 +25,12 @@ from transformers import AutoTokenizer
 from model.model import JianMindForCausalLM
 from torch.utils.data import Sampler
 
+#打印报告，只有主进程打印
+def is_main_process():
+    return not dist.is_initialized() or dist.get_rank() == 0
+def Logger(content):
+    if is_main_process():
+        print(content)
 
 #分布式初始化
 def init_distributed_mode():
@@ -120,6 +126,7 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None,
                 ckp_data['step'] = ckp_data['step'] * saved_ws // current_ws
                 Logger(f'GPU数量变化({saved_ws}→{current_ws})，step已自动转换为{ckp_data["step"]}')
             return ckp_data #返回恢复文件，包括权重梯度等等进行续训
+        Logger(f"⚠️ 未找到检查点文件，从头训练")
         return None #
 
 #创建模型
@@ -163,12 +170,6 @@ def get_model_params(model, config):
 def get_lr(current_step, total_steps, lr):
     return lr * (0.1 + 0.45 * (1 + math.cos(math.pi * current_step / total_steps)))
 
-#打印报告，只有主进程打印
-def is_main_process():
-    return not dist.is_initialized() or dist.get_rank() == 0
-def Logger(content):
-    if is_main_process():
-        print(content)
 
 #断点续训采样，续训时跳过已经训练过的样本
 class SkipBatchSampler(Sampler):

@@ -1,9 +1,46 @@
-torch>=2.0.0
-transformers>=4.30.0
-datasets>=2.0.0
-numpy>=1.20.0
-accelerate>=0.20.0
-tqdm>=4.60.0
-swanlab
+# ============================================================
+#  JianMind / MiniMind 训练依赖
+#  目标环境: 8× RTX 2080 Ti (22GB) | CUDA 13.0 | 无预装 Python
+# ============================================================
+#
+#  ▶ 部署步骤（在服务器上执行）:
+#
+#  1. 安装 Python 3.11（推荐 Miniconda）:
+#     wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+#     bash Miniconda3-latest-Linux-x86_64.sh
+#     conda create -n minimind python=3.11 -y && conda activate minimind
+#
+#  2. 安装 PyTorch（CUDA 13.0 版本）:
+#     pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 \
+#         --index-url https://download.pytorch.org/whl/cu130
+#     验证: python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
+#
+#  3. 安装其余依赖:
+#     pip install -r requirements.txt
+#
+#  4. 八卡 DDP 启动命令:
+#     torchrun --nproc_per_node=8 trainer/train_pretrain.py \
+#         --batch_size 20 --epochs 2 --dtype float16 \
+#         --data_path ../dataset/pretrain_t2t.jsonl
+# ============================================================
 
+# ---------- 核心框架 ----------
+# PyTorch >= 2.6 才能支持 CUDA 13.0；请通过上面的步骤2单独安装
+# torch, torchvision, torchaudio 不要写在这里，避免 pip 装到 CPU 版本
 
+# ---------- NLP 工具链 ----------
+transformers>=4.44.0,<5.0.0
+datasets>=2.20.0,<4.0.0
+tokenizers>=0.19.0,<1.0.0
+safetensors>=0.4.0,<1.0.0
+sentencepiece>=0.2.0
+
+# ---------- 数值计算 ----------
+numpy>=1.24.0,<3.0.0
+
+# ---------- 训练可视化 ----------
+swanlab>=0.3.0
+
+# ---------- 工具库 ----------
+tqdm>=4.66.0          # datasets 库内部依赖，建议保留
+pyyaml>=6.0           # transformers/datasets 加载配置文件时需要
