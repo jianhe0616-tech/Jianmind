@@ -15,7 +15,7 @@ fi
 
 echo "🚀 启动八卡 DDP 训练..."
 
-docker run -it --rm \
+docker run --rm \
     --gpus all \
     --shm-size=16g \
     --ipc=host \
