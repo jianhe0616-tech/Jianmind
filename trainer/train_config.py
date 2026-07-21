@@ -23,10 +23,12 @@ def get_train_config():
     # ====== 数据参数 ======
     parser.add_argument('--max_seq_len', default=512, type=int, help="最大序列长度")
     parser.add_argument("--data_path", type=str, default="../dataset/pretrain_t2t.jsonl", help="数据路径")
-    
+    parser.add_argument("--tokenizer_path", type=str, default="../dataset", help="tokenizer目录路径")
+
     # ====== 硬件参数 ======
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="训练设备")
-    parser.add_argument("--dtype", type=str, default="float16", help="混合精度类型(bf16需Ampere及以上,2080ti等Turing卡请用float16)")
+    parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float16", "bfloat16"],
+                        help="训练精度: float32(稳定,推荐2080Ti) / float16(需GradScaler) / bfloat16(需Ampere+)")
     parser.add_argument("--num_workers", type=int, default=min(4, os.cpu_count() or 4), help="数据加载线程数")
     
     # ====== 日志与保存 ======

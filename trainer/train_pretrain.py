@@ -54,43 +54,67 @@ def train_epoch(
         # ---- 3. 将数据移到指定设备（GPU/CPU） ----
         input_ids = input_ids.to(args.device)   # 输入token ID → GPU
         labels = labels.to(args.device)         # 标签token ID → GPU
-        last_step = step                        # 更新当前步数  
-        # ---- 4. 动态更新学习率（余弦退火） ----
-        # 计算全局步数位置，用于余弦退火曲线定位
+        last_step = step                        # 更新当前步数
+        grad_norm = 0.0                         # 梯度范数
+        # ---- 4. 动态更新学习率（warmup + 余弦退火） ----
+        # 前 50 步 warmup，防止初始梯度爆炸污染 AdamW 动量
         lr = get_lr(
             epoch * iterations + step,          # 当前全局步数
             args.epochs * iterations,           # 训练总步数
-            args.learning_rate                  # 初始学习率
+            args.learning_rate,                 # 初始学习率
+            warmup_steps=50                     # warmup 步数
         )
         # 将计算出的学习率赋给优化器的所有参数组
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
-        # ---- 5. 前向传播（混合精度） ----
-        with autocast_ctx:                      # 进入混合精度上下文
-            res = model(input_ids, labels=labels)  # 模型前向传播
-            # 总损失 = 主损失（语言建模）+ 辅助损失（MoE负载均衡）
-            loss = res.loss  #+ res.aux_loss
-            # 除以梯度累积步数，使累积后的总梯度与标准训练一致
+        # ---- 5. 前向传播 ----
+        with autocast_ctx:
+            # ✅ 温度缩放：logits 除以 temperature，防止过大值导致 NaN
+            # 初始 temperature=1.0，随着 logits_max 增长可以增加到 2.0
+            temperature = 1.0 + 0.5 * (step / iterations)  # 从 1.0 线性增长到 1.5
+            res = model(input_ids, labels=labels, temperature=temperature)
+            loss = res.loss
+        # 梯度累积：loss 除以累积步数
+        if args.accumulation_steps > 1:
             loss = loss / args.accumulation_steps
-        # ---- 6. 反向传播（带混合精度缩放） ----
-        # scaler.scale(loss) 防止float16梯度下溢
-        scaler.scale(loss).backward()
+
+        # ---- 6. 反向传播 ----
+        loss.backward()
+
+        # === 诊断：前 10 步 + NaN 检测 ===
+        has_nan_grad = False
+        for p in model.parameters():
+            if p.grad is not None and torch.isnan(p.grad).any():
+                has_nan_grad = True
+                break
+        if (step <= 10 or has_nan_grad) and is_main_process():
+            loss_val = loss.item() * args.accumulation_steps
+            logits_max = res.logits.abs().max().item()
+            if has_nan_grad:
+                nan_count = sum(1 for p in model.parameters() if p.grad is not None and torch.isnan(p.grad).any())
+                Logger(f'[step={step}] ⚠️ loss={loss_val:.4f} logits_max={logits_max:.2f} NaN梯度={nan_count}个 跳过更新')
+            else:
+                raw_grad_norm = sum(p.grad.norm().item()**2 for p in model.parameters() if p.grad is not None) ** 0.5
+                Logger(f'[step={step}] loss={loss_val:.4f} logits_max={logits_max:.2f} raw_grad={raw_grad_norm:.2f} lr={lr:.6f}')
+
         # ---- 7. 梯度累积：达到累积步数时更新参数 ----
         if step % args.accumulation_steps == 0:
-            # 7a. 反缩放梯度（恢复真实梯度值）
-            scaler.unscale_(optimizer)    
-            # 7b. 梯度裁剪（防止梯度爆炸）
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(), 
-                args.grad_clip
-            )
-            # 7c. 更新模型参数（自动处理缩放）
-            scaler.step(optimizer)
-            # 7d. 更新缩放因子（根据梯度是否溢出调整）
-            scaler.update()
-            # 7e. 清零梯度（set_to_none=True 比 zero_grad() 更高效）
-            optimizer.zero_grad(set_to_none=True)
-            # ---- 8. 日志记录（每log_interval步打印一次） ----
+            if has_nan_grad:
+                # NaN 梯度 → 跳过参数更新，保护 AdamW 内部状态不被污染
+                if is_main_process():
+                    Logger(f'[step={step}] ⚠️ 检测到 NaN 梯度，跳过更新')
+                optimizer.zero_grad(set_to_none=True)
+            else:
+                # 7a. 梯度裁剪（防止梯度爆炸），同时记录梯度范数
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    args.grad_clip
+                ).item()
+                # 7b. 更新模型参数
+                optimizer.step()
+                # 7c. 清零梯度
+                optimizer.zero_grad(set_to_none=True)
+        # ---- 8. 日志记录（每log_interval步打印一次） ----
         if step % args.log_interval == 0 or step == iterations:
             # 8a. 计算已消耗时间
             spend_time = time.time() - start_time
@@ -120,8 +144,8 @@ def train_epoch(
                 f'({step}/{iterations}), '
                 f'loss: {current_loss:.4f}, '
                 f'logits_loss: {current_logits_loss:.4f}, '
-               # f'aux_loss: {current_aux_loss:.4f}, '
                 f'lr: {current_lr:.8f}, '
+                f'grad_norm: {grad_norm:.4f}, '
                 f'epoch_time: {eta_min:.1f}min'
             )
             
@@ -168,7 +192,6 @@ def train_epoch(
                 weight=args.save_weight,
                 model=model,
                 optimizer=optimizer,
-                scaler=scaler,
                 epoch=epoch,
                 step=step,
                 wandb=wandb,
@@ -182,18 +205,13 @@ def train_epoch(
         # ---- 10. 清理当前step的变量（释放显存/内存） ----
         del input_ids, labels, res, loss
     # ---- 11. 处理最后不足一个累积步数的残余梯度 ----
-    # 场景：accumulation_steps=8，总步数=10
-    # step=1~8 更新了一次，step=9~10 的梯度还没更新
-    # 这里补上最后一次更新，避免梯度丢失
     if last_step > start_step and last_step % args.accumulation_steps != 0:
-        scaler.unscale_(optimizer)                      # 反缩放梯度
-        torch.nn.utils.clip_grad_norm_(                 # 梯度裁剪
-            model.parameters(), 
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
             args.grad_clip
         )
-        scaler.step(optimizer)                          # 更新参数
-        scaler.update()                                 # 更新缩放因子
-        optimizer.zero_grad(set_to_none=True)           # 清零梯度
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
 
 if __name__ == "__main__":
         # ========== 1. 初始化环境和随机种子 ==========
@@ -207,9 +225,16 @@ if __name__ == "__main__":
     ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir=args.save_dir) if args.from_resume==1 else None
     
     # ========== 3. 设置混合精度 ==========
-    device_type = "cuda" if "cuda" in args.device else "cpu"
-    dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
-    autocast_ctx = nullcontext() if device_type == "cpu" else torch.amp.autocast(device_type='cuda', dtype=dtype)
+    if args.dtype == "float32":
+        # fp32 全精度：不需要 autocast，所有计算在 fp32 下进行
+        autocast_ctx = nullcontext()
+        Logger('使用 float32 全精度训练（推荐 2080Ti 等 Turing 卡）')
+    elif args.dtype == "bfloat16":
+        autocast_ctx = torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16)
+        Logger('使用 bfloat16 混合精度（需要 Ampere+ GPU）')
+    else:
+        autocast_ctx = torch.amp.autocast(device_type='cuda', dtype=torch.float16)
+        Logger('使用 float16 混合精度')
     # ========== 4. 配wandb ==========
     wandb = None
     if args.use_wandb and is_main_process():
@@ -220,18 +245,16 @@ if __name__ == "__main__":
         wandb.init(project=args.wandb_project, name=wandb_run_name, id=wandb_id, resume=resume)
     
     # ========== 5. 定义模型、数据、优化器 ==========
-    model, tokenizer = init_model(lm_config, args.from_weight, device=args.device)
+    model, tokenizer = init_model(lm_config, args.from_weight, tokenizer_path=args.tokenizer_path, save_dir=args.save_dir, device=args.device)
     train_ds = PretrainDataset(args.data_path, tokenizer, max_length=args.max_seq_len)
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
-    scaler = torch.amp.GradScaler(enabled=(args.dtype == 'float16'))
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
-    
+
     # ========== 6. 从ckp恢复状态 ==========
     start_epoch, start_step = 0, 0
     if ckp_data:
         model.load_state_dict(ckp_data['model'])
         optimizer.load_state_dict(ckp_data['optimizer'])
-        scaler.load_state_dict(ckp_data['scaler'])
         start_epoch = ckp_data['epoch']
         start_step = ckp_data.get('step', 0)
     
@@ -241,6 +264,9 @@ if __name__ == "__main__":
         Logger('torch.compile enabled')
     if dist.is_initialized():
         model = DistributedDataParallel(model, device_ids=[local_rank])
+
+    Logger(f'batch_size={args.batch_size} dtype={args.dtype} '
+           f'accumulation={args.accumulation_steps} grad_clip={args.grad_clip}')
     
     # ========== 8. 开始训练 ==========
     world_size = dist.get_world_size() if dist.is_initialized() else 1

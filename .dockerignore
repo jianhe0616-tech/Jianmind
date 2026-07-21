@@ -1,0 +1,9 @@
+.git
+.vscode
+__pycache__
+*.pyc
+out/
+checkpoints/
+*.output
+dataset/*.jsonl
+.DS_Store

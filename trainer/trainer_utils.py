@@ -166,9 +166,14 @@ def get_model_params(model, config):
 
 
 
-#学习率
-def get_lr(current_step, total_steps, lr):
-    return lr * (0.1 + 0.45 * (1 + math.cos(math.pi * current_step / total_steps)))
+#学习率（带 warmup）
+def get_lr(current_step, total_steps, lr, warmup_steps=50):
+    # Warmup 阶段：线性增长到 lr
+    if current_step < warmup_steps:
+        return lr * (current_step + 1) / warmup_steps
+    # Cosine decay 阶段
+    progress = (current_step - warmup_steps) / (total_steps - warmup_steps)
+    return lr * (0.1 + 0.45 * (1 + math.cos(math.pi * progress)))
 
 
 #断点续训采样，续训时跳过已经训练过的样本

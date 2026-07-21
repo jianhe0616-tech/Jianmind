@@ -196,7 +196,7 @@ class JianMindModel(nn.Module):
             # 创建 total_len × total_len 的掩码，只掩盖新 token 之间的未来位置
             mask = torch.zeros(seq_len, total_len, device=x.device, dtype=x.dtype)
             mask[:, past_len:] = torch.triu(
-                torch.full((seq_len, seq_len), -1e9, device=x.device, dtype=x.dtype),
+                torch.full((seq_len, seq_len), -1e4, device=x.device, dtype=x.dtype),
                 diagonal=1
             )
             attention_mask = mask
@@ -258,22 +258,28 @@ class JianMindForCausalLM(PreTrainedModel, GenerationMixin):
         use_cache: bool = False,
         logits_to_keep: Optional[int] = None,  # ✅ 默认 None，只在推理时使用
         labels: Optional[torch.Tensor] = None,
+        temperature: float = 1.0,  # ✅ 温度缩放，防止 logits 过大导致 NaN
         **kwargs
     ):
         # 前向传播
         hidden_states, new_past_key_values = self.model(
             input_ids, past_key_values, use_cache
         )
-        
+
         # 计算 logits
         logits = self.lm_head(hidden_states)  # (batch, seq_len, vocab)
-        
+
         # 计算 loss（如果有 labels）
         loss = None
         if labels is not None:
             # 训练时使用完整 logits
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
+
+            # ✅ 温度缩放：防止 logits 过大导致 NaN 梯度
+            if temperature != 1.0:
+                shift_logits = shift_logits / temperature
+
             loss = F.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1),
