@@ -175,7 +175,15 @@ class JianMindModel(nn.Module):
         batch_size , seq_len = input_ids.shape
 
         # 1. 计算已缓存的序列长度（用于位置编码偏移）
-        if past_key_values is not None:
+        # 健壮检查：确保 past_key_values 有效
+        if (past_key_values
+            and isinstance(past_key_values, list)
+            and len(past_key_values) > 0
+            and past_key_values[0] is not None
+            and isinstance(past_key_values[0], tuple)
+            and len(past_key_values[0]) > 0
+            and past_key_values[0][0] is not None
+            and isinstance(past_key_values[0][0], torch.Tensor)):
             past_len = past_key_values[0][0].shape[1]  # 第一层 past_k 的 seq_len
         else:
             past_len = 0
@@ -216,29 +224,23 @@ class JianMindModel(nn.Module):
         return hidden_state, new_past_key_values
 
 class JianMindForCausalLM(PreTrainedModel, GenerationMixin):
+    """
+    遵循 HuggingFace CausalLM 标准接口的生成模型
+    支持 model.generate() 的所有功能：采样、贪心、beam search 等
+    """
     config_class = JianMindConfig
-    
+    _tied_weights_keys = ["lm_head.weight"]
+
     def __init__(self, config):
         super().__init__(config)
         self.model = JianMindModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        
-class JianMindForCausalLM(PreTrainedModel, GenerationMixin):
-    config_class = JianMindConfig
-    
-    def __init__(self, config):
-        super().__init__(config)
-        
-        self.model = JianMindModel(config)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        
-        # ✅ 先初始化所有权重
+
+        # 先初始化权重，再绑定 lm_head 与 embed_tokens
         self.post_init()
-        
-        # ✅ 然后绑定权重（覆盖初始化）  绑定之后指向同一个权重对象
         if getattr(self.config, "tie_word_embeddings", True):
             self.lm_head.weight = self.model.embed_tokens.weight
-    
+
     def _init_weights(self, module):
         """由 post_init 调用"""
         std = getattr(self.config, "initializer_range", 0.02)
@@ -251,32 +253,52 @@ class JianMindForCausalLM(PreTrainedModel, GenerationMixin):
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
 
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.model.embed_tokens = value
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings
+
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
         past_key_values: Optional[list] = None,
-        use_cache: bool = False,
-        logits_to_keep: Optional[int] = None,  # ✅ 默认 None，只在推理时使用
+        inputs_embeds: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
-        temperature: float = 1.0,  # ✅ 温度缩放，防止 logits 过大导致 NaN
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        temperature: float = None,
         **kwargs
     ):
         # 前向传播
         hidden_states, new_past_key_values = self.model(
-            input_ids, past_key_values, use_cache
+            input_ids, past_key_values, use_cache or False
         )
 
         # 计算 logits
-        logits = self.lm_head(hidden_states)  # (batch, seq_len, vocab)
+        logits = self.lm_head(hidden_states)
 
         # 计算 loss（如果有 labels）
         loss = None
         if labels is not None:
-            # 训练时使用完整 logits
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
 
-            # ✅ 温度缩放：防止 logits 过大导致 NaN 梯度
+            # 动态温度缩放：防止 logits 过大导致 NaN
+            if temperature is None:
+                logits_max = shift_logits.abs().max().item()
+                temperature = logits_max / 15.0 if logits_max > 30 else 1.0
+
             if temperature != 1.0:
                 shift_logits = shift_logits / temperature
 
@@ -285,16 +307,67 @@ class JianMindForCausalLM(PreTrainedModel, GenerationMixin):
                 shift_labels.view(-1),
                 ignore_index=-100
             )
-        
-        # 裁剪（仅在推理时，且 logits_to_keep 被指定）
-        if logits_to_keep is not None and labels is None:
-            if not isinstance(logits_to_keep, int) or logits_to_keep <= 0:
-                raise ValueError(f"logits_to_keep must be positive int, got {logits_to_keep}")
-            logits = logits[:, -logits_to_keep:, :]
-        
+
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=new_past_key_values,
             hidden_states=hidden_states,
         )
+
+    def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        **kwargs
+    ):
+        """
+        HuggingFace GenerationMixin 每步调用的标准接口
+        负责：1) 处理 KV cache 2) 裁剪 input_ids 3) 传递必要参数
+        """
+        # 有有效的 KV cache 时，只传入最后一个 token
+        if self._has_valid_cache(past_key_values):
+            input_ids = input_ids[:, -1:]
+            past_key_values = past_key_values
+        else:
+            past_key_values = None
+
+        # 如果提供了 inputs_embeds 且没有 cache，用 embeds 代替 input_ids
+        if inputs_embeds is not None and past_key_values is None:
+            model_inputs = {"inputs_embeds": inputs_embeds}
+        else:
+            model_inputs = {"input_ids": input_ids}
+
+        model_inputs.update({
+            "past_key_values": past_key_values,
+            "use_cache": True,
+            "attention_mask": attention_mask,
+        })
+        return model_inputs
+
+    def _reorder_cache(self, past_key_values, beam_idx):
+        """beam search 时重排 KV cache（GenerationMixin 要求的标准方法）"""
+        reordered_past = []
+        for layer_past in past_key_values:
+            reordered_past.append(
+                tuple(past_state.index_select(0, beam_idx.to(past_state.device))
+                      for past_state in layer_past)
+            )
+        return reordered_past
+
+    @staticmethod
+    def _has_valid_cache(past_key_values):
+        """检查 KV cache 是否有效"""
+        if past_key_values is None:
+            return False
+        if isinstance(past_key_values, (list, tuple)):
+            if len(past_key_values) == 0:
+                return False
+            first = past_key_values[0]
+            if first is None:
+                return False
+            if isinstance(first, tuple) and len(first) > 0:
+                return first[0] is not None and isinstance(first[0], torch.Tensor)
+        return False

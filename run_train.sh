@@ -27,7 +27,7 @@ docker run --rm \
     torchrun --nproc_per_node=8 \
         --master_port=29500 \
         trainer/train_pretrain.py \
-        --batch_size 20 \
+        --batch_size 40 \
         --epochs 2 \
         --dtype float32 \
         --max_seq_len 512 \

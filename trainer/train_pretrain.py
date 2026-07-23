@@ -69,10 +69,8 @@ def train_epoch(
             param_group['lr'] = lr
         # ---- 5. 前向传播 ----
         with autocast_ctx:
-            # ✅ 温度缩放：logits 除以 temperature，防止过大值导致 NaN
-            # 初始 temperature=1.0，随着 logits_max 增长可以增加到 2.0
-            temperature = 1.0 + 0.5 * (step / iterations)  # 从 1.0 线性增长到 1.5
-            res = model(input_ids, labels=labels, temperature=temperature)
+            # ✅ 动态温度缩放：logits 过大时自动调整 temperature
+            res = model(input_ids, labels=labels)  # temperature=None 使用动态调整
             loss = res.loss
         # 梯度累积：loss 除以累积步数
         if args.accumulation_steps > 1:
