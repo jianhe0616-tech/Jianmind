@@ -93,8 +93,9 @@ class MultiHeadAttention(nn.Module):
         if attention_mask is not None:
             attn_scores = attn_scores + attention_mask  #注意力掩码通常是一个很大的负数，用于屏蔽不需要关注的部分
 
-        #softmax+dropout
-        attn_scores = F.softmax(attn_scores,dim=-1)
+        #softmax+dropout（数值稳定版：减去最大值防止 exp 溢出）
+        attn_scores = attn_scores - attn_scores.max(dim=-1, keepdim=True).values
+        attn_scores = F.softmax(attn_scores, dim=-1)
         attn_scores = self.attention_dropout(attn_scores)
 
         #计算注意力输出
@@ -305,7 +306,8 @@ class JianMindForCausalLM(PreTrainedModel, GenerationMixin):
             loss = F.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1),
-                ignore_index=-100
+                ignore_index=-100,
+                label_smoothing=0.1,  # 标签平滑：防止 logits 过大，提高泛化
             )
 
         return CausalLMOutputWithPast(

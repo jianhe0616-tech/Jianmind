@@ -246,7 +246,11 @@ if __name__ == "__main__":
     model, tokenizer = init_model(lm_config, args.from_weight, tokenizer_path=args.tokenizer_path, save_dir=args.save_dir, device=args.device)
     train_ds = PretrainDataset(args.data_path, tokenizer, max_length=args.max_seq_len)
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.learning_rate,
+        weight_decay=0.1,  # 权重衰减：防止权重过大，提高泛化
+    )
 
     # ========== 6. 从ckp恢复状态 ==========
     start_epoch, start_step = 0, 0
