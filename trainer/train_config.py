@@ -27,8 +27,8 @@ def get_train_config():
 
     # ====== 硬件参数 ======
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="训练设备")
-    parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float16", "bfloat16"],
-                        help="训练精度: float32(稳定,推荐2080Ti) / float16(需GradScaler) / bfloat16(需Ampere+)")
+    parser.add_argument("--dtype", type=str, default="bfloat16", choices=["float32", "float16", "bfloat16"],
+                        help="训练精度: bfloat16(推荐4090/A100) / float32(稳定但慢) / float16(需GradScaler)")
     parser.add_argument("--num_workers", type=int, default=min(4, os.cpu_count() or 4), help="数据加载线程数")
     
     # ====== 日志与保存 ======
